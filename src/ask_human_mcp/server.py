@@ -933,6 +933,65 @@ def _verify_slack_signature(
     return hmac.compare_digest(expected, signature)
 
 
+_BEARER_PREFIX = "bearer "
+
+
+def _bearer_token(auth_header: str) -> str:
+    """Pull the token out of an `Authorization: Bearer <token>` header.
+
+    Returns "" for a missing, malformed, or non-Bearer header rather than
+    raising; the caller treats "" as reject. The scheme match is
+    case-insensitive per RFC 7235.
+    """
+    if not auth_header or not auth_header.lower().startswith(_BEARER_PREFIX):
+        return ""
+    return auth_header[len(_BEARER_PREFIX) :].strip()
+
+
+def _auth_error(
+    request: Request, settings: Settings, route: str
+) -> JSONResponse | None:
+    """Gate a mutating HTTP route on the shared secret.
+
+    Returns None when the caller is authorized, or the JSONResponse to send
+    when it is not. Fail-closed on purpose: with no secret configured we cannot
+    authenticate anyone, so we refuse (503) rather than serve the request. That
+    mirrors /slack/interactions with no signing secret, and it means a
+    misconfigured deploy is loud (every ping 503s, logged as
+    `auth.not_configured`) instead of quietly reachable by anyone who guesses
+    the hostname.
+
+    Read-only routes (/health, GET /afk) deliberately stay open.
+    """
+    secret = settings.ask_human_shared_secret
+    if not secret:
+        log.warning(
+            "auth.not_configured",
+            route=route,
+            hint=(
+                "ASK_HUMAN_SHARED_SECRET is unset; refusing mutating requests. "
+                "Generate one with `openssl rand -hex 32`, set it in the "
+                "service env file, and give the hooks the same value."
+            ),
+        )
+        return JSONResponse(
+            {"status": "error", "detail": "shared secret not configured"},
+            status_code=503,
+        )
+    presented = _bearer_token(request.headers.get("Authorization", ""))
+    # Compare as bytes: hmac.compare_digest raises TypeError on non-ASCII str.
+    if not presented or not hmac.compare_digest(
+        presented.encode("utf-8"), secret.encode("utf-8")
+    ):
+        log.warning("auth.rejected", route=route, presented_token=bool(presented))
+        return JSONResponse(
+            {"status": "error", "detail": "unauthorized"},
+            status_code=401,
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return None
+
+
 def _afk_control_blocks(afk_on: bool) -> list[dict[str, Any]]:
     """Blocks for the reusable AFK control message: a status line plus a single
     toggle button whose label/value reflects the action (turn it off when on,
@@ -1162,7 +1221,13 @@ def build_app(
         AFK (especially OFF, which must not ping Slack). Distinct from /notify
         on purpose: a server predating this route 404s here instead of posting a
         spurious message, so the hooks are safe to ship before the server is
-        deployed. Refreshes the pinned control message to reflect the new state."""
+        deployed. Refreshes the pinned control message to reflect the new state.
+
+        Authenticated: flipping AFK changes how every session behaves and
+        reposts the pinned Slack control message."""
+        denied = _auth_error(request, _get_settings(), "/afk")
+        if denied is not None:
+            return denied
         try:
             payload = await request.json()
         except Exception as e:
@@ -1185,7 +1250,13 @@ def build_app(
         @-mentions the user so a push notification fires deterministically.
         The hook script forwards Claude Code's raw hook payload here; we
         parse hook_event_name, cwd, message, and (for AFK Stop) wait_for_reply.
+
+        Authenticated: this route posts attacker-controlled text into the Slack
+        workspace and can hold a request open for the full wait window.
         """
+        denied = _auth_error(request, _get_settings(), "/notify")
+        if denied is not None:
+            return denied
         try:
             payload = await request.json()
         except Exception as e:
@@ -1297,7 +1368,22 @@ def main() -> None:
     """Entry point for the `ask-human-mcp` console script."""
     app = build_app()
     s = _get_settings()
-    log.info("ask_human.starting", host=s.host, port=s.port)
+    log.info(
+        "ask_human.starting",
+        host=s.host,
+        port=s.port,
+        auth_configured=bool(s.ask_human_shared_secret),
+    )
+    if not s.ask_human_shared_secret:
+        # Loud at boot, not only on the first refused request: without this the
+        # symptom is "notifications stopped" on some other machine, hours later.
+        log.warning(
+            "startup.auth_not_configured",
+            hint=(
+                "ASK_HUMAN_SHARED_SECRET is unset: POST /notify and POST /afk "
+                "will refuse every request with 503."
+            ),
+        )
     asyncio.run(_startup_identity_check())
     app.run(transport="streamable-http")
 

@@ -21,9 +21,13 @@ import pytest
 import hashlib
 import hmac
 
+from starlette.requests import Request
+
 import ask_human_mcp.server as server_mod
 from ask_human_mcp.config import Settings
 from ask_human_mcp.server import (
+    _auth_error,
+    _bearer_token,
     _button_decisions,
     _notify_last_ts,
     _parse_approval_reply,
@@ -122,11 +126,12 @@ class FakeBridge:
         return self.find_result
 
 
-def _settings() -> Settings:
+def _settings(shared_secret: str = "") -> Settings:
     return Settings(
         slack_bot_token="xoxb-test",
         slack_channel_id="DTEST",
         slack_user_id="UTEST",
+        ask_human_shared_secret=shared_secret,
         poll_interval_seconds=0.01,
         max_timeout_seconds=60,
         log_level="WARNING",
@@ -1254,3 +1259,127 @@ async def test_run_notify_afk_announcement_carries_back_button() -> None:
     assert actions, "announcement must carry an actions block"
     afk_block = next(b for b in actions if b.get("block_id") == "afk_controls")
     assert afk_block["elements"][0]["action_id"] == "afk_off"
+
+
+# --- Bearer auth on the mutating routes ---------------------------------------
+
+
+def _request(headers: dict[str, str] | None = None, path: str = "/notify") -> Request:
+    """A real Starlette Request carrying the given headers, no server needed."""
+    raw = [
+        (k.lower().encode("latin-1"), v.encode("latin-1"))
+        for k, v in (headers or {}).items()
+    ]
+    return Request({"type": "http", "method": "POST", "path": path, "headers": raw})
+
+
+# (configured secret, Authorization header or None, expected status code;
+# None as the expected status means "authorized, no response").
+# Expectations are written out literally rather than recomputed from the
+# parsing rule, so the table can disagree with the implementation.
+_AUTH_CASES = [
+    # No secret configured -> fail closed, regardless of what the caller sends.
+    ("", None, 503),
+    ("", "Bearer s3cret", 503),
+    ("", "Bearer ", 503),
+    # Configured, but the caller doesn't present a usable credential.
+    ("s3cret", None, 401),
+    ("s3cret", "", 401),
+    ("s3cret", "Bearer", 401),
+    ("s3cret", "Bearer ", 401),
+    ("s3cret", "Bearer wrong", 401),
+    ("s3cret", "Basic s3cret", 401),
+    ("s3cret", "s3cret", 401),
+    # Near-misses: prefix and suffix of the real secret must not pass.
+    ("s3cret", "Bearer s3cre", 401),
+    ("s3cret", "Bearer s3crets", 401),
+    # Non-ASCII must reject cleanly, not raise (hmac.compare_digest on str
+    # raises TypeError outside ASCII, which would 500 instead of 401).
+    ("s3cret", "Bearer ünicode", 401),
+    # The real credential, with the scheme spelled any of the legal ways.
+    ("s3cret", "Bearer s3cret", None),
+    ("s3cret", "bearer s3cret", None),
+    ("s3cret", "BEARER s3cret", None),
+    ("s3cret", "Bearer  s3cret  ", None),
+]
+
+
+@pytest.mark.parametrize(("secret", "header", "expected"), _AUTH_CASES)
+def test_auth_error_cross_product(
+    secret: str, header: str | None, expected: int | None
+) -> None:
+    """The gate over every combination of configured-secret x presented-header."""
+    request = _request({"Authorization": header} if header is not None else None)
+    result = _auth_error(request, _settings(shared_secret=secret), "/notify")
+    if expected is None:
+        assert result is None, f"expected authorized for {header!r}"
+    else:
+        assert result is not None, f"expected {expected} for {header!r}"
+        assert result.status_code == expected
+
+
+def test_auth_error_401_advertises_bearer_scheme() -> None:
+    """A refusal names the scheme the caller should have used."""
+    result = _auth_error(_request(), _settings(shared_secret="s3cret"), "/notify")
+    assert result is not None
+    assert result.headers["WWW-Authenticate"] == "Bearer"
+
+
+def test_bearer_token_extraction() -> None:
+    """_bearer_token returns the token, or "" for anything it can't parse."""
+    assert _bearer_token("Bearer abc") == "abc"
+    assert _bearer_token("bearer abc") == "abc"
+    assert _bearer_token("Bearer   abc  ") == "abc"
+    assert _bearer_token("Basic abc") == ""
+    assert _bearer_token("abc") == ""
+    assert _bearer_token("") == ""
+    assert _bearer_token("Bearer") == ""
+
+
+def _route_client(secret: str):
+    """TestClient over the real ASGI app, so route wiring is exercised (not just
+    the helper). Custom routes don't need the MCP session manager, so the
+    lifespan is deliberately not started."""
+    from starlette.testclient import TestClient
+
+    app = server_mod.build_app(
+        settings=_settings(shared_secret=secret),
+        bridge=FakeBridge(reply=None),  # type: ignore[arg-type]
+    )
+    return TestClient(app.streamable_http_app())
+
+
+@pytest.mark.parametrize("route", ["/notify", "/afk"])
+def test_mutating_routes_reject_unauthenticated_requests(route: str) -> None:
+    """Both state-changing routes are actually wired to the gate."""
+    client = _route_client("s3cret")
+    body = {"afk": True} if route == "/afk" else {"hook_event_name": "Stop", "cwd": "/x"}
+    assert client.post(route, json=body).status_code == 401
+    assert (
+        client.post(
+            route, json=body, headers={"Authorization": "Bearer wrong"}
+        ).status_code
+        == 401
+    )
+    # ...and an unauthenticated POST changed nothing.
+    assert server_mod._afk_state is False
+
+
+@pytest.mark.parametrize("route", ["/notify", "/afk"])
+def test_mutating_routes_accept_the_shared_secret(route: str) -> None:
+    """The same requests succeed once the bearer token is presented."""
+    client = _route_client("s3cret")
+    body = {"afk": True} if route == "/afk" else {"hook_event_name": "Stop", "cwd": "/x"}
+    resp = client.post(route, json=body, headers={"Authorization": "Bearer s3cret"})
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ok"
+
+
+def test_read_only_routes_stay_open() -> None:
+    """/health and GET /afk are unauthenticated by design; they leak a status
+    and a boolean, and the hooks poll /afk on every tool call."""
+    client = _route_client("s3cret")
+    assert client.get("/health").status_code == 200
+    afk = client.get("/afk")
+    assert afk.status_code == 200
+    assert afk.json() == {"afk": False}

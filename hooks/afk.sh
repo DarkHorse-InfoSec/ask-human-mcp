@@ -21,21 +21,42 @@ AFK_FILE="${ASK_HUMAN_AFK_MARKER:-$HOME/.claude/.afk}"
 # message, and a server that predates this route 404s silently instead of
 # pinging. Keeps a manual toggle from spamming Slack.
 AFK_STATE_URL="${ASK_HUMAN_AFK_URL:-http://127.0.0.1:8765/afk}"
+# POST /afk requires the shared secret as a bearer token. Env first, then the
+# secret file (one line, chmod 600).
+SECRET_FILE="${ASK_HUMAN_SECRET_FILE:-$HOME/.claude/.ask-human-secret}"
 
 mkdir -p "$(dirname "$AFK_FILE")" 2>/dev/null
 
+_shared_secret() {
+    if [ -n "${ASK_HUMAN_SHARED_SECRET:-}" ]; then
+        printf '%s' "$ASK_HUMAN_SHARED_SECRET"
+    elif [ -r "$SECRET_FILE" ]; then
+        tr -d '\r\n' < "$SECRET_FILE"
+    fi
+}
+
 # Sync the server-authoritative AFK state so the Slack control message + any
 # remote toggle agree with this local marker. Best-effort: never block or fail
-# the toggle if the server is unreachable.
+# the toggle if the server is unreachable. An auth refusal is called out
+# though, because a silently unsynced toggle is how "Slack still thinks I'm
+# AFK" happens.
 _sync_server() {
-    local state="$1" body
+    local state="$1" body secret code
+    local auth=()
     if [ "$state" = "on" ]; then
         body='{"afk":true}'
     else
         body='{"afk":false}'
     fi
-    curl -fsS --max-time 4 -X POST -H 'Content-Type: application/json' \
-        -d "$body" "$AFK_STATE_URL" >/dev/null 2>&1 || true
+    secret="$(_shared_secret)"
+    [ -n "$secret" ] && auth=(-H "Authorization: Bearer $secret")
+    code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 4 -X POST \
+        -H 'Content-Type: application/json' ${auth[@]+"${auth[@]}"} \
+        -d "$body" "$AFK_STATE_URL" 2>/dev/null || true)"
+    case "$code" in
+        401) echo "warning: server rejected the shared secret (401); AFK state not synced." >&2 ;;
+        503) echo "warning: server has no shared secret configured (503); AFK state not synced." >&2 ;;
+    esac
 }
 
 case "${1:-toggle}" in

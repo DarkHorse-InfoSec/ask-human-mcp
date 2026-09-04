@@ -61,6 +61,56 @@ def _make_ssl_context() -> "ssl.SSLContext | None":
 
 _HTTP_SSL_CTX = _make_ssl_context()
 
+# Shared secret for the server's mutating routes (POST /notify, POST /afk).
+# Read from ASK_HUMAN_SHARED_SECRET, else from ~/.claude/.ask-human-secret (one
+# line, chmod 600 on POSIX). Absence is deliberately not fatal here: the request
+# still goes out, the server answers 401, and _auth_hint() explains it. Failing
+# closed is the server's job; failing loudly is this hook's.
+SECRET_FILE_PATH = os.path.expanduser(
+    os.environ.get("ASK_HUMAN_SECRET_FILE", "~/.claude/.ask-human-secret")
+)
+
+
+def _shared_secret() -> str:
+    secret = os.environ.get("ASK_HUMAN_SHARED_SECRET", "").strip()
+    if secret:
+        return secret
+    try:
+        with open(SECRET_FILE_PATH, encoding="utf-8") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+def _post_headers() -> dict:
+    """JSON content type plus the bearer credential when we have one."""
+    headers = {"Content-Type": "application/json"}
+    secret = _shared_secret()
+    if secret:
+        headers["Authorization"] = "Bearer " + secret
+    return headers
+
+
+def _auth_hint(err) -> None:
+    """Name a 401/503 out loud. Both are ways the shared secret can be wrong,
+    and both otherwise present as 'Slack just quietly stopped working'."""
+    code = getattr(err, "code", None)
+    if code == 401:
+        sys.stderr.write(
+            "[afk-trigger] server rejected the shared secret (401). Compare "
+            f"ASK_HUMAN_SHARED_SECRET / {SECRET_FILE_PATH} with the server's "
+            "ASK_HUMAN_SHARED_SECRET.\n"
+        )
+    elif code == 503:
+        sys.stderr.write(
+            "[afk-trigger] server has no shared secret configured (503). Set "
+            "ASK_HUMAN_SHARED_SECRET in its env file and restart it.\n"
+        )
+    else:
+        return
+    sys.stderr.flush()
+
+
 AFK_MARKER_PATH = os.path.expanduser(
     os.environ.get("ASK_HUMAN_AFK_MARKER", "~/.claude/.afk")
 )
@@ -463,11 +513,12 @@ def _push_afk_state(state: bool, trigger: str, payload: dict) -> None:
         req = urllib.request.Request(
             url,
             data=json.dumps(body).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers=_post_headers(),
             method="POST",
         )
         urllib.request.urlopen(req, timeout=ANNOUNCE_TIMEOUT, context=_HTTP_SSL_CTX).read()
     except Exception as e:
+        _auth_hint(e)
         sys.stderr.write(f"[afk-trigger] state push failed ({e}); will rely on next Stop\n")
         sys.stderr.flush()
 

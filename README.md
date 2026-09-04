@@ -18,6 +18,39 @@ Lives at `https://askhuman.example.com` once deployed.
 
 ## Endpoints
 
+### Authentication
+
+The two state-changing routes require a shared secret, presented as
+`Authorization: Bearer <secret>`:
+
+| Route | Auth | Why |
+|---|---|---|
+| `POST /notify` | bearer | posts caller-supplied text into your Slack workspace, and can hold a request open for the whole AFK wait window |
+| `POST /afk` | bearer | flips AFK state for every session and reposts the pinned Slack control message |
+| `POST /slack/interactions` | Slack request signature | verified against `SLACK_SIGNING_SECRET` |
+| `GET /health`, `GET /afk` | none | read-only; a status and a boolean, and the hooks poll `/afk` on every tool call |
+
+Set the same value on both sides:
+
+```bash
+openssl rand -hex 32                       # generate once
+
+# server: /etc/ask-human-mcp/env (or .env locally)
+ASK_HUMAN_SHARED_SECRET=<the value>
+
+# every machine running the hooks
+umask 077 && printf '%s' '<the value>' > ~/.claude/.ask-human-secret
+```
+
+The hooks read `ASK_HUMAN_SHARED_SECRET` first, then
+`~/.claude/.ask-human-secret` (override the path with `ASK_HUMAN_SECRET_FILE`).
+
+**Fail-closed:** with no secret configured the server refuses every request to
+those routes with `503` and logs `auth.not_configured`, rather than serving
+them unauthenticated. A wrong or missing token gets `401` with
+`auth.rejected`. The hooks print both cases to stderr instead of failing
+silently, because otherwise the symptom is just "Slack went quiet."
+
 ### `GET /health`
 
 ```json
@@ -72,7 +105,8 @@ uv venv
 uv pip install -e ".[dev]"
 
 cp .env.example .env
-# Edit .env with SLACK_BOT_TOKEN, SLACK_CHANNEL_ID, SLACK_USER_ID
+# Edit .env with SLACK_BOT_TOKEN, SLACK_CHANNEL_ID, SLACK_USER_ID,
+# and ASK_HUMAN_SHARED_SECRET (see Authentication above)
 
 ask-human-mcp
 # Listens on 127.0.0.1:8765 by default.
@@ -273,6 +307,8 @@ sudo -u askhuman bash -c '
 sudo install -o root -g askhuman -m 0640 /dev/null /etc/ask-human-mcp/env
 sudoedit /etc/ask-human-mcp/env
 # paste contents of .env.example, fill in real values
+# ASK_HUMAN_SHARED_SECRET is required: without it POST /notify and POST /afk
+# refuse every request with 503. Give the hook machines the same value.
 ```
 
 ### 5. systemd unit
@@ -343,6 +379,10 @@ server, and wire it into Claude Code:
 cp -r hooks ~/.claude/ask-human-hooks
 export ASK_HUMAN_NOTIFY_URL=https://your-domain/notify   # default: localhost
 export ASK_HUMAN_AFK_URL=https://your-domain/afk
+
+# The bearer credential for POST /notify and POST /afk. Env var, or the file
+# below so it survives across shells and hook invocations.
+umask 077 && printf '%s' '<the shared secret>' > ~/.claude/.ask-human-secret
 ```
 
 | Hook file | Wire to | Does |
