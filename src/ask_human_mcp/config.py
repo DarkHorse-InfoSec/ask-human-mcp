@@ -15,6 +15,7 @@ class Settings(BaseSettings):
         slack_user_id: Slack user ID of the human who answers (used to filter replies).
 
     Optional:
+        ask_human_shared_secret: Bearer secret gating POST /notify and POST /afk.
         host, port: HTTP bind address for the MCP server.
         poll_interval_seconds: How often to poll conversations.replies.
         max_timeout_seconds: Hard cap on per-call timeout to prevent runaway waits.
@@ -41,6 +42,20 @@ class Settings(BaseSettings):
     # approver, so only add IDs you control.
     slack_approver_ids: str = Field(
         "", description="Comma-separated extra Slack user IDs authorized to approve"
+    )
+
+    # Shared secret required on the mutating HTTP routes (POST /notify and
+    # POST /afk). The local hooks present it as `Authorization: Bearer <secret>`.
+    # When unset, those routes refuse every request (503) instead of running
+    # unauthenticated: the server is reachable from the public internet through
+    # the reverse proxy, and an open /notify lets anyone post into the Slack
+    # workspace, park a session on a fabricated approval prompt, or flip AFK
+    # state. Same fail-closed posture as slack_signing_secret above. Generate
+    # with `openssl rand -hex 32`. Read-only routes (/health, GET /afk) stay
+    # open; they leak a boolean and a connection status.
+    ask_human_shared_secret: str = Field(
+        "",
+        description="Shared secret presented as Authorization: Bearer on POST /notify and POST /afk",
     )
 
     host: str = Field("127.0.0.1", description="HTTP bind host")
