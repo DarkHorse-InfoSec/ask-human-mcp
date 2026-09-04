@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+build/
+dist/
+.venv/
+venv/
+
+# Tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Secrets and local config
+.env
+.env.*
+!.env.example
+slack.txt
+*.secrets
+*.pem
+*.key
+
+# Local agent + editor config (machine-specific)
+.claude/
+AGENTS.md
+
+# Internal working notes: contain real Slack IDs, handles, and session history
+tasks/
+CLAUDE.md
+
+# Scratch
+New Text Document.txt
+*.tmp
+
+# Tests for preapprove-hook.py, which lives outside this repo
+tests/test_preapprove_hook.py
+tests/smoke_preapprove.py
+
+# Internal ops runbook: names machines, points at private fleet docs,
+# and describes the removed ask_human/wait_for_reply flow
+CON-DEMO-RUNBOOK.md

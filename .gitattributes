@@ -1,0 +1,8 @@
+# Normalise to LF in the repo so clones on Linux/macOS are byte-identical.
+# Git for Windows ships core.autocrlf=true in its SYSTEM config, which would
+# otherwise rewrite these on checkout.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.gz  binary

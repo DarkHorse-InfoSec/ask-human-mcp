@@ -1,0 +1,53 @@
+[Unit]
+Description=ask-human MCP server (Claude Code <-> Slack bridge)
+Documentation=https://github.com/darkhorse-infosec/ask-human-mcp
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=askhuman
+Group=askhuman
+WorkingDirectory=/opt/ask-human-mcp
+EnvironmentFile=/etc/ask-human-mcp/env
+ExecStart=/opt/ask-human-mcp/.venv/bin/ask-human-mcp
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+KillSignal=SIGTERM
+
+# stdout/stderr -> journald (JSON lines from structlog).
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ask-human-mcp
+
+# Hardening.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @debug @mount @swap @reboot @raw-io @cpu-emulation @obsolete
+
+# The service holds nothing on disk; deny all writes.
+ReadWritePaths=
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

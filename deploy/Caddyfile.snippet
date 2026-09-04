@@ -1,0 +1,21 @@
+# Append to /etc/caddy/Caddyfile on your-server (203.0.113.10).
+# Style matches a conventional Caddy vhost block.
+#
+# Prerequisite: add A record askhuman.example.com -> 203.0.113.10
+# before reloading, otherwise Caddy will retry ACME until DNS resolves.
+
+askhuman.example.com {
+    header {
+        Permissions-Policy "camera=(), microphone=(), geolocation=()"
+        -Server
+    }
+
+    reverse_proxy localhost:8765 {
+        transport http {
+            read_timeout 5h
+            write_timeout 5h
+            dial_timeout 10s
+        }
+        flush_interval -1
+    }
+}
