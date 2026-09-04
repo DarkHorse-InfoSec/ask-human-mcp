@@ -49,3 +49,6 @@ tests/smoke_preapprove.py
 # Internal ops runbook: names machines, points at private fleet docs,
 # and describes the removed ask_human/wait_for_reply flow
 CON-DEMO-RUNBOOK.md
+
+# Private deploy helper: targets a specific host, not for publication
+scripts/deploy-src.sh
